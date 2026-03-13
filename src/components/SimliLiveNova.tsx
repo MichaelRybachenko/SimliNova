@@ -21,6 +21,7 @@ const SimliLiveNova: React.FC = () => {
   const dominantColorRef = useRef<string | null>(null);
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const localVideoStreamRef = useRef<MediaStream | null>(null);
+  const videoIntervalRef = useRef<number | null>(null);
 
   // --- State ---
   const [isSimliReady, setIsSimliReady] = useState(false);
@@ -125,7 +126,10 @@ const SimliLiveNova: React.FC = () => {
       stopLocalVideoStream();
       setIsScreenSharing(false);
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: true,
+          audio: false,
+        });
         localVideoStreamRef.current = stream;
         if (localVideoRef.current) {
           localVideoRef.current.srcObject = stream;
@@ -146,12 +150,15 @@ const SimliLiveNova: React.FC = () => {
       stopLocalVideoStream();
       setIsCameraActive(false);
       try {
-        const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+        const stream = await navigator.mediaDevices.getDisplayMedia({
+          video: true,
+          audio: false,
+        });
         localVideoStreamRef.current = stream;
         if (localVideoRef.current) {
           localVideoRef.current.srcObject = stream;
         }
-        stream.getVideoTracks()[0].addEventListener('ended', () => {
+        stream.getVideoTracks()[0].addEventListener("ended", () => {
           stopLocalVideoStream();
           setIsScreenSharing(false);
         });
@@ -248,7 +255,6 @@ const SimliLiveNova: React.FC = () => {
 
     const ws = new WebSocket(url);
 
-
     wsRef.current = ws;
 
     ws.onopen = () => {
@@ -261,7 +267,10 @@ const SimliLiveNova: React.FC = () => {
       const response = JSON.parse(event.data);
 
       if (response.type === "error") {
-        console.error("NOVA Websocket Error:", JSON.stringify(response.error, null, 2));
+        console.error(
+          "NOVA Websocket Error:",
+          JSON.stringify(response.error, null, 2),
+        );
       } else if (response.type === "session.created") {
         console.log("Session created. Send session.update...");
         // Initial Setup Message (session.update)
@@ -302,71 +311,109 @@ conversational tax guidance for high-frequency traders and tech professionals.
   legal filing, state: "While I'm your AI guide, always double-check 
   the final numbers with a certified professional."
   `,
-          audio: {
-            input: {
-              turn_detection: {
-                threshold: 0.5
-              }
-            },
-            output: {
-              voice: "olivia" // Can change later
-            }
-          },
-          tools: [
-            {
-              type: "function",
-              name: "print_album_concept",
-              description: "Saves a finalized musical album concept to the database.",
-              parameters: {
-                type: "object",
-                properties: {
-                  title: { type: "string", description: "The title of the album" },
-                  genre: { type: "string", description: "The genre fusion" },
-                  description: { type: "string", description: "Detailed concept summary" },
-                  tracklist: { type: "string", description: "List of tracks in the album" },
-                  instrumental: { type: "boolean", description: "Whether the album is instrumental or has vocals" },
-                  art_prompt: { type: "string", description: "Visual prompt for cover art" },
+            audio: {
+              input: {
+                turn_detection: {
+                  threshold: 0.5,
                 },
-                required: ["title", "genre", "description", "tracklist", "instrumental", "art_prompt"],
               },
-            }
-          ]
-        }
-      };
+              output: {
+                voice: "olivia", // Can change later
+              },
+            },
+            tools: [
+              {
+                type: "function",
+                name: "print_album_concept",
+                description:
+                  "Saves a finalized musical album concept to the database.",
+                parameters: {
+                  type: "object",
+                  properties: {
+                    title: {
+                      type: "string",
+                      description: "The title of the album",
+                    },
+                    genre: { type: "string", description: "The genre fusion" },
+                    description: {
+                      type: "string",
+                      description: "Detailed concept summary",
+                    },
+                    tracklist: {
+                      type: "string",
+                      description: "List of tracks in the album",
+                    },
+                    instrumental: {
+                      type: "boolean",
+                      description:
+                        "Whether the album is instrumental or has vocals",
+                    },
+                    art_prompt: {
+                      type: "string",
+                      description: "Visual prompt for cover art",
+                    },
+                  },
+                  required: [
+                    "title",
+                    "genre",
+                    "description",
+                    "tracklist",
+                    "instrumental",
+                    "art_prompt",
+                  ],
+                },
+              },
+            ],
+          },
+        };
 
-      ws.send(JSON.stringify(sessionUpdate));
-    } else if (response.type === "session.updated") {
-      console.log("Session updated. Ready to start.");
-      // First message to kick things off
-      const welcome = {
-        type: "conversation.item.create",
-        item: {
-          type: "message",
-          role: "user",
-          content: [
-            {
-              type: "input_text",
-              text: "Hello, Alisa! Today I want to talk about tax strategies for my stock trading. Can you help me understand how wash-sale rules work?",
-            }
-          ]
-        }
-      };
+        ws.send(JSON.stringify(sessionUpdate));
+      } else if (response.type === "session.updated") {
+        console.log("Session updated. Ready to start.");
+        // First message to kick things off
+        const welcome = {
+          type: "conversation.item.create",
+          item: {
+            type: "message",
+            role: "user",
+            content: [
+              {
+                type: "input_text",
+                text: "Hello, Alisa! Today I want to talk about tax strategies for my stock trading. Can you help me understand how wash-sale rules work?",
+              },
+            ],
+          },
+        };
 
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify(welcome));
-        console.log("Sent Welcome Message");
-      }
-    } else if (response.type === "response.output_audio.delta") {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify(welcome));
+          console.log("Sent Welcome Message");
+          setChatHistory((prev) => [
+            ...prev,
+            { role: "user", content: welcome.item.content[0].text },
+          ]);
+        }
+      } else if (response.type === "response.output_audio.delta") {
         const pcm24kRaw = base64ToUint8Array(response.delta);
-        const int16_24k = new Int16Array(pcm24kRaw.buffer, pcm24kRaw.byteOffset, pcm24kRaw.byteLength / 2);
+        const int16_24k = new Int16Array(
+          pcm24kRaw.buffer,
+          pcm24kRaw.byteOffset,
+          pcm24kRaw.byteLength / 2,
+        );
         const int16_16k = downsampleTo16k(int16_24k);
 
         if (simliClientRef.current) {
-          const audioBuffer = new Uint8Array(int16_16k.buffer, int16_16k.byteOffset, int16_16k.byteLength);
+          const audioBuffer = new Uint8Array(
+            int16_16k.buffer,
+            int16_16k.byteOffset,
+            int16_16k.byteLength,
+          );
 
           if (audioRef.current) {
             if (audioRef.current.paused) {
-              audioRef.current.play().catch((e) => console.error("Playback failed:", e));
+              audioRef.current
+                .play()
+                .catch((e) => console.error("Playback failed:", e));
             }
             audioRef.current.muted = false;
           }
@@ -385,7 +432,7 @@ conversational tax guidance for high-frequency traders and tech professionals.
       } else if (response.type === "response.function_call_arguments.done") {
         // Nova wants us to execute the function and return the results
         const fc = response;
-        
+
         console.log("Advisor is calling function:", fc.name);
 
         let functionResult: any = {};
@@ -427,48 +474,58 @@ ${concept.art_prompt}`,
         }
 
         // Send function output back
-        wsRef.current?.send(JSON.stringify({
-          type: "conversation.item.create",
-          item: {
-            type: "function_call_output",
-            call_id: fc.call_id,
-            output: JSON.stringify(functionResult)
-          }
-        }));
-      } else if (response.type === "conversation.item.input_audio_transcription.completed") {
-         setChatHistory((prev) => [
-           ...prev,
-           {
-             role: "user",
-             content: response.transcript,
-           },
-         ]);
-      } else if (response.type === "response.content_part.added") {
-        console.log(`Response content part added (${response.type}): `, response);
-        if (response.part?.type === "text") {
-          setChatHistory((prev) => [
-            ...prev,
-            {
-              role: "assistant",
-              content: response.part.text
+        wsRef.current?.send(
+          JSON.stringify({
+            type: "conversation.item.create",
+            item: {
+              type: "function_call_output",
+              call_id: fc.call_id,
+              output: JSON.stringify(functionResult),
             },
-          ]);
-        }
+          }),
+        );
+      } else if (
+        response.type ===
+        "conversation.item.input_audio_transcription.completed"
+      ) {
+        console.log(
+          `Response content part added (${response.type}): `,
+          response,
+        );
+        setChatHistory((prev) => [
+          ...prev,
+          {
+            role: "user",
+            content: response.transcript,
+          },
+        ]);
       } else if (response.type === "response.output_item.done") {
         console.log(`Response output item done (${response.type}): `, response);
-        if (response.part?.text) {
-          setChatHistory((prev) => [
-            ...prev,
-            {
-              role: "assistant",
-              content: response.part.text
-            },
-          ]);
-        }
-      } else if (response.type === "response.done") {
-        console.log(`Response done (${response.type}): `, response);
+        const itemId = response.item?.id;
+
+        response.item?.content?.forEach((part) => {
+          if (part.transcript) {
+            setChatHistory((prev) => {
+              // Ensure we don't add duplicate messages by checking if the last message in history has the same ID
+              const existingIndex = prev.findIndex((msg) => msg.id === itemId);
+              if (existingIndex !== -1) {
+                const updated = [...prev];
+                updated[existingIndex] = { ...updated[existingIndex], content: part.transcript };
+                return updated;
+              }
+              return [
+                ...prev,
+                {
+                  id: itemId,
+                  role: "assistant",
+                  content: part.transcript,
+                },
+              ];
+            });
+          }
+        });
       } else {
-        console.warn("Uncaught message type:", response.type, response);
+        console.log(`Message: ${response.type}: `,  response);
       }
     };
 
@@ -497,15 +554,17 @@ ${concept.art_prompt}`,
 
     console.log("Sending user message:", inputText);
 
-    wsRef.current.send(JSON.stringify({
-      type: "conversation.item.create",
-      item: {
-        type: "message",
-        role: "user",
-        content: [{ type: "input_text", text: inputText }]
-      }
-    }));
-    
+    wsRef.current.send(
+      JSON.stringify({
+        type: "conversation.item.create",
+        item: {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: inputText }],
+        },
+      }),
+    );
+
     // We omit response.create here as well because we have server VAD enabled.
     // wait, if we send a text message and it's set to server VAD, does it auto respond?
     // It might. But actually, "response.create is not supported when server VAD is enabled."
@@ -554,7 +613,8 @@ ${concept.art_prompt}`,
       const TARGET_SAMPLES = 4800; // 200ms at 24kHz
 
       workletNode.port.onmessage = (event) => {
-        if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+        if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN)
+          return;
 
         const pcmData = new Int16Array(event.data);
         audioBufferChunk.push(pcmData);
@@ -578,10 +638,12 @@ ${concept.art_prompt}`,
 
           const base64Audio = arrayBufferToBase64(buffer);
 
-          wsRef.current.send(JSON.stringify({
-            type: "input_audio_buffer.append",
-            audio: base64Audio,
-          }));
+          wsRef.current.send(
+            JSON.stringify({
+              type: "input_audio_buffer.append",
+              audio: base64Audio,
+            }),
+          );
 
           // Reset
           audioBufferChunk = [];
@@ -653,6 +715,82 @@ ${concept.art_prompt}`,
     }
   }, [isMicMuted]);
 
+  // Sync the local video stream with the video element whenever it mounts
+  useEffect(() => {
+    if ((isCameraActive || isScreenSharing) && localVideoRef.current && localVideoStreamRef.current) {
+      localVideoRef.current.srcObject = localVideoStreamRef.current;
+      localVideoRef.current.play().catch(e => console.error("Video play error:", e));
+    }
+  }, [isCameraActive, isScreenSharing]);
+
+  // Handle Video Frame Streaming to AI Server
+  useEffect(() => {
+    if (videoIntervalRef.current) {
+      clearInterval(videoIntervalRef.current);
+      videoIntervalRef.current = null;
+    }
+
+    if (isCameraActive || isScreenSharing) {
+      const canvas = document.createElement("canvas");
+      const ctx = canvas.getContext("2d");
+
+      // We'll capture and send frames periodically. 
+      videoIntervalRef.current = window.setInterval(() => {
+        if (
+          localVideoRef.current &&
+          localVideoRef.current.readyState >= 2 // HTMLMediaElement.HAVE_CURRENT_DATA
+        ) {
+          canvas.width = localVideoRef.current.videoWidth;
+          canvas.height = localVideoRef.current.videoHeight;
+          ctx?.drawImage(localVideoRef.current, 0, 0, canvas.width, canvas.height);
+          
+          canvas.toBlob(
+            (blob) => {
+              if (blob) {
+                const reader = new FileReader();
+                reader.readAsDataURL(blob);
+                reader.onloadend = () => {
+                  const dataUrl = reader.result as string;
+                  
+                  // NOTE: The Amazon Nova "nova-2-sonic-v1" model strictly only supports 
+                  // "input_text" and "input_audio_buffer" in its realtime schema currently.
+                  // Sending images causes: "Content type 'image_url' is not supported. Only 'input_text' is supported."
+                  // We are commenting out the send function here so it doesn't crash your connection.
+                  /*
+                  wsRef.current?.send(
+                    JSON.stringify({
+                      type: "conversation.item.create",
+                      item: {
+                        type: "message",
+                        role: "user",
+                        content: [
+                          {
+                            type: "image_url",
+                            image_url: { url: dataUrl },
+                          },
+                        ],
+                      },
+                    })
+                  );
+                  */
+                };
+              }
+            },
+            "image/jpeg",
+            0.5
+          );
+        }
+      }, 2000);
+    }
+
+    return () => {
+      if (videoIntervalRef.current) {
+        clearInterval(videoIntervalRef.current);
+        videoIntervalRef.current = null;
+      }
+    };
+  }, [isCameraActive, isScreenSharing]);
+
   const startVisualizer = () => {
     if (!canvasRef.current || !analyserRef.current) return;
 
@@ -721,7 +859,6 @@ ${concept.art_prompt}`,
 
   return (
     <div className="flex flex-row bg-black items-center justify-center min-h-screen h-screen overflow-hidden text-white font-sans p-4 gap-8">
-      
       {/* Transcript Section (Left Side) */}
       {showTranscript && (
         <div className="flex flex-col w-full max-w-2xl h-full animate-in fade-in slide-in-from-left-4 duration-300 pb-8">
@@ -940,7 +1077,17 @@ ${concept.art_prompt}`,
                 }`}
                 title="Toggle Screen Share"
               >
-                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  width="20"
+                  height="20"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
                   <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
                   <line x1="8" y1="21" x2="16" y2="21"></line>
                   <line x1="12" y1="17" x2="12" y2="21"></line>
@@ -957,7 +1104,17 @@ ${concept.art_prompt}`,
                 }`}
                 title="Toggle Camera"
               >
-                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  width="20"
+                  height="20"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
                   <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path>
                   <circle cx="12" cy="13" r="4"></circle>
                 </svg>
@@ -1106,18 +1263,18 @@ ${concept.art_prompt}`,
       {/* Local Video Section (Right Side) */}
       {(isCameraActive || isScreenSharing) && (
         <div className="flex flex-col w-full max-w-sm h-full animate-in fade-in slide-in-from-right-4 duration-300 pb-8 pt-8 items-center justify-center">
-           <div className="bg-gray-900 rounded-lg overflow-hidden border border-gray-800 flex flex-col shadow-inner relative justify-center w-full min-h-[200px]">
-             <div className="absolute top-2 left-2 bg-black/60 px-2 py-1 rounded text-xs z-10 backdrop-blur-sm text-gray-200">
-               {isCameraActive ? "Camera Active" : "Screen Share Active"}
-             </div>
-             <video
-                ref={localVideoRef}
-                autoPlay
-                playsInline
-                muted
-                className="w-full object-contain max-h-[70vh] rounded-lg"
-             />
-           </div>
+          <div className="bg-gray-900 rounded-lg overflow-hidden border border-gray-800 flex flex-col shadow-inner relative justify-center w-full min-h-[200px]">
+            <div className="absolute top-2 left-2 bg-black/60 px-2 py-1 rounded text-xs z-10 backdrop-blur-sm text-gray-200">
+              {isCameraActive ? "Camera Active" : "Screen Share Active"}
+            </div>
+            <video
+              ref={localVideoRef}
+              autoPlay
+              playsInline
+              muted
+              className="w-full object-contain max-h-[70vh] rounded-lg"
+            />
+          </div>
         </div>
       )}
     </div>
