@@ -19,6 +19,8 @@ const SimliLiveNova: React.FC = () => {
   const analyserRef = useRef<AnalyserNode | null>(null);
   const animationFrameRef = useRef<number | null>(null);
   const dominantColorRef = useRef<string | null>(null);
+  const localVideoRef = useRef<HTMLVideoElement>(null);
+  const localVideoStreamRef = useRef<MediaStream | null>(null);
 
   // --- State ---
   const [isSimliReady, setIsSimliReady] = useState(false);
@@ -40,6 +42,8 @@ const SimliLiveNova: React.FC = () => {
   const [showTranscript, setShowTranscript] = useState(true);
   const [showThinking, setShowThinking] = useState(true);
   const [isSpeaking, setIsSpeaking] = useState(false);
+  const [isCameraActive, setIsCameraActive] = useState(false);
+  const [isScreenSharing, setIsScreenSharing] = useState(false);
 
   // --- Constants ---
   const NOVA_API_KEY = import.meta.env.VITE_NOVA_API_KEY;
@@ -101,6 +105,61 @@ const SimliLiveNova: React.FC = () => {
       }
     }
     return result;
+  };
+
+  const stopLocalVideoStream = useCallback(() => {
+    if (localVideoStreamRef.current) {
+      localVideoStreamRef.current.getTracks().forEach((track) => track.stop());
+      localVideoStreamRef.current = null;
+    }
+    if (localVideoRef.current) {
+      localVideoRef.current.srcObject = null;
+    }
+  }, []);
+
+  const toggleCamera = async () => {
+    if (isCameraActive) {
+      stopLocalVideoStream();
+      setIsCameraActive(false);
+    } else {
+      stopLocalVideoStream();
+      setIsScreenSharing(false);
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+        localVideoStreamRef.current = stream;
+        if (localVideoRef.current) {
+          localVideoRef.current.srcObject = stream;
+        }
+        setIsCameraActive(true);
+      } catch (err) {
+        console.error("Camera access denied or not available.", err);
+        setError("Camera access denied or not available.");
+      }
+    }
+  };
+
+  const toggleScreenShare = async () => {
+    if (isScreenSharing) {
+      stopLocalVideoStream();
+      setIsScreenSharing(false);
+    } else {
+      stopLocalVideoStream();
+      setIsCameraActive(false);
+      try {
+        const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+        localVideoStreamRef.current = stream;
+        if (localVideoRef.current) {
+          localVideoRef.current.srcObject = stream;
+        }
+        stream.getVideoTracks()[0].addEventListener('ended', () => {
+          stopLocalVideoStream();
+          setIsScreenSharing(false);
+        });
+        setIsScreenSharing(true);
+      } catch (err) {
+        console.error("Screen sharing failed.", err);
+      }
+    }
   };
 
   // --- Initialization ---
@@ -570,6 +629,10 @@ ${concept.art_prompt}`,
         cancelAnimationFrame(animationFrameRef.current);
         animationFrameRef.current = null;
       }
+      if (localVideoStreamRef.current) {
+        localVideoStreamRef.current.getTracks().forEach((t) => t.stop());
+        localVideoStreamRef.current = null;
+      }
     };
   }, [hasInteracted]);
 
@@ -867,6 +930,39 @@ ${concept.art_prompt}`,
 
             {/* Middle: Controls */}
             <div className="flex items-center gap-4">
+              {/* Screen Share Toggle */}
+              <button
+                onClick={toggleScreenShare}
+                className={`p-3 rounded-full transition-all shadow-lg ${
+                  isScreenSharing
+                    ? "bg-green-600 hover:bg-green-700 text-white"
+                    : "bg-gray-800/80 hover:bg-gray-700 text-white backdrop-blur-sm"
+                }`}
+                title="Toggle Screen Share"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
+                  <line x1="8" y1="21" x2="16" y2="21"></line>
+                  <line x1="12" y1="17" x2="12" y2="21"></line>
+                </svg>
+              </button>
+
+              {/* Camera Toggle */}
+              <button
+                onClick={toggleCamera}
+                className={`p-3 rounded-full transition-all shadow-lg ${
+                  isCameraActive
+                    ? "bg-emerald-600 hover:bg-emerald-700 text-white"
+                    : "bg-gray-800/80 hover:bg-gray-700 text-white backdrop-blur-sm"
+                }`}
+                title="Toggle Camera"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path>
+                  <circle cx="12" cy="13" r="4"></circle>
+                </svg>
+              </button>
+
               {/* Thinking Toggle */}
               <button
                 onClick={() => setShowThinking(!showThinking)}
@@ -1006,6 +1102,24 @@ ${concept.art_prompt}`,
           </button>
         </div>
       </div>
+
+      {/* Local Video Section (Right Side) */}
+      {(isCameraActive || isScreenSharing) && (
+        <div className="flex flex-col w-full max-w-sm h-full animate-in fade-in slide-in-from-right-4 duration-300 pb-8 pt-8 items-center justify-center">
+           <div className="bg-gray-900 rounded-lg overflow-hidden border border-gray-800 flex flex-col shadow-inner relative justify-center w-full min-h-[200px]">
+             <div className="absolute top-2 left-2 bg-black/60 px-2 py-1 rounded text-xs z-10 backdrop-blur-sm text-gray-200">
+               {isCameraActive ? "Camera Active" : "Screen Share Active"}
+             </div>
+             <video
+                ref={localVideoRef}
+                autoPlay
+                playsInline
+                muted
+                className="w-full object-contain max-h-[70vh] rounded-lg"
+             />
+           </div>
+        </div>
+      )}
     </div>
   );
 };
