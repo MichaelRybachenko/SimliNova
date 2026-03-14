@@ -1,5 +1,112 @@
 import React, { useEffect, useRef, useState, useCallback } from "react";
 import { LogLevel, SimliClient } from "simli-client";
+import { BedrockRuntimeClient, ConverseCommand } from "@aws-sdk/client-bedrock-runtime";
+
+// This represents the legacy format - leaving comment but removing global
+// let mockVault: any = {};
+
+const bedrockClient = new BedrockRuntimeClient({
+  region: "us-east-1",
+  credentials: {
+    accessKeyId: import.meta.env.VITE_AWS_ACCESS_KEY_ID || "",
+    secretAccessKey: import.meta.env.VITE_AWS_SECRET_ACCESS_KEY || "",
+  }
+});
+
+async function analyzeTaxFiles(files: File[]) {
+  const content: any[] = [];
+
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
+    const buffer = await file.arrayBuffer();
+    const uint8Array = new Uint8Array(buffer);
+
+    if (file.type === "application/pdf") {
+      content.push({
+        document: {
+          name: `doc_${i}`,
+          format: "pdf",
+          source: { bytes: uint8Array }
+        }
+      });
+    } else if (file.type.startsWith("image/")) {
+      let format = "jpeg"; // default
+      if (file.type === "image/png") format = "png";
+      else if (file.type === "image/webp") format = "webp";
+      else if (file.type === "image/gif") format = "gif";
+      else if (file.type === "image/jpeg") format = "jpeg";
+
+      content.push({
+        image: {
+          format: format,
+          source: { bytes: uint8Array }
+        }
+      });
+    }
+  }
+
+  const extractionPrompt = `
+    Analyze this document (or set of images) and return a JSON object with these EXACT keys:
+    {
+      "identity": {
+        "full_name": "string",
+        "ssn_last_4": "string"
+      },
+      "metadata": {
+        "tax_year": "YYYY",
+        "form_type": "1099-B | 1099-DIV | W-2 | etc"
+      },
+      "data_fields": {
+        "key": "value" // Extract EVERY field found on the form
+      },
+      "alisa_speech": "A short 1-sentence confirmation of who this belongs to and what it is."
+    }
+    Strictly return JSON. If the year or name is missing, mark as "UNKNOWN".
+  `;
+
+  content.push({ text: extractionPrompt });
+
+  let response;
+  try {
+    const command = new ConverseCommand({
+      modelId: "us.amazon.nova-lite-v1:0", // Cross-region Nova Lite
+      messages: [{ role: "user", content }]
+    });
+    response = await bedrockClient.send(command);
+  } catch (err: any) {
+    console.warn("Cross-region Nova Lite failed, falling back to base ID amazon.nova-lite-v1:0", err);
+    try {
+      const fallbackCommand = new ConverseCommand({
+        modelId: "amazon.nova-lite-v1:0", // Fallback to base Nova Lite
+        messages: [{ role: "user", content }]
+      });
+      response = await bedrockClient.send(fallbackCommand);
+    } catch(fallbackErr) {
+       throw fallbackErr; // If this fails, let the error propagate to the UI
+    }
+  }
+
+  const text = response.output?.message?.content?.[0]?.text || "";
+  
+  // Try to cleanly extract JSON if wrapped in markdown blocks
+  const jsonMatch = text.match(/\{[\s\S]*\}/);
+  if (jsonMatch) {
+    return jsonMatch[0];
+  }
+  return text;
+}
+
+// No longer using `routeDocumentMock` since we manage state in React now, but keeping for reference or you can completely remove it down the line.
+
+export interface TaxDocument {
+  id: string;
+  owner: string;
+  taxYear: string;
+  formName: string;
+  ordinalNumber: number;
+  dataFields: string; // JSON string for easy editing
+  isReviewing: boolean; // Flag to indicate if user needs to confirm missing info
+}
 
 const SimliLiveNova: React.FC = () => {
   // --- Refs ---
@@ -19,10 +126,7 @@ const SimliLiveNova: React.FC = () => {
   const analyserRef = useRef<AnalyserNode | null>(null);
   const animationFrameRef = useRef<number | null>(null);
   const dominantColorRef = useRef<string | null>(null);
-  const localVideoRef = useRef<HTMLVideoElement>(null);
-  const localVideoStreamRef = useRef<MediaStream | null>(null);
-  const videoIntervalRef = useRef<number | null>(null);
-
+  
   // --- State ---
   const [isSimliReady, setIsSimliReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -43,11 +147,15 @@ const SimliLiveNova: React.FC = () => {
   const [showTranscript, setShowTranscript] = useState(true);
   const [showThinking, setShowThinking] = useState(true);
   const [isSpeaking, setIsSpeaking] = useState(false);
-  const [isCameraActive, setIsCameraActive] = useState(false);
-  const [isScreenSharing, setIsScreenSharing] = useState(false);
+  
+  // --- Scanner States ---
+  const [scanFiles, setScanFiles] = useState<File[]>([]);
+  const [isScanning, setIsScanning] = useState(false);
+  const [scanResult, setScanResult] = useState<any>(null); // Kept for raw errors
+  const [vaultDocuments, setVaultDocuments] = useState<TaxDocument[]>([]);
+  const vaultDocumentsRef = useRef<TaxDocument[]>([]); // To access in WebSocket closure
 
   // --- Constants ---
-  const NOVA_API_KEY = import.meta.env.VITE_NOVA_API_KEY;
   const SIMLI_API_KEY = import.meta.env.VITE_SIMLI_API_KEY;
   const SIMLI_FACE_ID = import.meta.env.VITE_SIMLI_FACE_ID;
 
@@ -108,64 +216,67 @@ const SimliLiveNova: React.FC = () => {
     return result;
   };
 
-  const stopLocalVideoStream = useCallback(() => {
-    if (localVideoStreamRef.current) {
-      localVideoStreamRef.current.getTracks().forEach((track) => track.stop());
-      localVideoStreamRef.current = null;
-    }
-    if (localVideoRef.current) {
-      localVideoRef.current.srcObject = null;
-    }
-  }, []);
-
-  const toggleCamera = async () => {
-    if (isCameraActive) {
-      stopLocalVideoStream();
-      setIsCameraActive(false);
-    } else {
-      stopLocalVideoStream();
-      setIsScreenSharing(false);
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: true,
-          audio: false,
-        });
-        localVideoStreamRef.current = stream;
-        if (localVideoRef.current) {
-          localVideoRef.current.srcObject = stream;
-        }
-        setIsCameraActive(true);
-      } catch (err) {
-        console.error("Camera access denied or not available.", err);
-        setError("Camera access denied or not available.");
-      }
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files) {
+      setScanFiles(Array.from(e.target.files));
     }
   };
 
-  const toggleScreenShare = async () => {
-    if (isScreenSharing) {
-      stopLocalVideoStream();
-      setIsScreenSharing(false);
-    } else {
-      stopLocalVideoStream();
-      setIsCameraActive(false);
-      try {
-        const stream = await navigator.mediaDevices.getDisplayMedia({
-          video: true,
-          audio: false,
-        });
-        localVideoStreamRef.current = stream;
-        if (localVideoRef.current) {
-          localVideoRef.current.srcObject = stream;
-        }
-        stream.getVideoTracks()[0].addEventListener("ended", () => {
-          stopLocalVideoStream();
-          setIsScreenSharing(false);
-        });
-        setIsScreenSharing(true);
-      } catch (err) {
-        console.error("Screen sharing failed.", err);
+  const scanSelectedFiles = async () => {
+    if (scanFiles.length === 0) return;
+    setIsScanning(true);
+    setScanResult(null);
+    try {
+      const rawResultString = await analyzeTaxFiles(scanFiles);
+      const parsed = JSON.parse(rawResultString);
+      
+      const formName = parsed.metadata?.form_type && parsed.metadata.form_type !== "UNKNOWN" ? parsed.metadata.form_type : "";
+      const taxYear = parsed.metadata?.tax_year && parsed.metadata.tax_year !== "UNKNOWN" ? parsed.metadata.tax_year : "";
+      const owner = parsed.identity?.full_name && parsed.identity.full_name !== "UNKNOWN" ? parsed.identity.full_name : "";
+      
+      const ordinal = vaultDocumentsRef.current.filter(d => d.formName === formName && d.taxYear === taxYear && d.owner === owner).length + 1;
+      const isMissingInfo = !formName || !taxYear || !owner;
+      
+      const newDoc: TaxDocument = {
+          id: `doc_${Date.now()}`,
+          owner,
+          taxYear: taxYear.toString(),
+          formName,
+          ordinalNumber: ordinal,
+          dataFields: JSON.stringify(parsed.data_fields || {}, null, 2),
+          isReviewing: isMissingInfo
+      };
+
+      const updatedVault = [...vaultDocumentsRef.current, newDoc];
+      setVaultDocuments(updatedVault);
+      vaultDocumentsRef.current = updatedVault;
+
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        // Send a system prompt routing the data
+        const systemMessage = {
+          type: "conversation.item.create",
+          item: {
+            type: "message",
+            role: "user",
+            content: [
+              {
+                text: `[SYSTEM] Nova Lite Vision just scanned a document. Result: ${rawResultString}. 
+                ${isMissingInfo ? "Some fields were missing, so the user might need to fill them in." : "It has been saved to the vault."} 
+                Acknowledge this briefly.`,
+              },
+            ],
+          },
+        };
+        wsRef.current.send(JSON.stringify(systemMessage));
+        // Force the assistant to reply
+        wsRef.current.send(JSON.stringify({ type: "response.create" }));
       }
+    } catch (err: any) {
+      console.error("Scan error", err);
+      setScanResult({ error: err.name || "Error", message: err.message || JSON.stringify(err) });
+    } finally {
+      setIsScanning(false);
+      setScanFiles([]);
     }
   };
 
@@ -251,7 +362,8 @@ const SimliLiveNova: React.FC = () => {
   const connectToNova = () => {
     // Port might vary depending on Vite. Let's use relative path.
     const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const url = `${scheme}//${window.location.host}/nova-realtime?model=nova-2-sonic-v1`;
+    // Switched back to Sonic model 
+    const url = `${scheme}//${window.location.host}/nova-realtime?model=amazon.nova-2-sonic-v1:0`;
 
     const ws = new WebSocket(url);
 
@@ -324,45 +436,13 @@ conversational tax guidance for high-frequency traders and tech professionals.
             tools: [
               {
                 type: "function",
-                name: "print_album_concept",
-                description:
-                  "Saves a finalized musical album concept to the database.",
+                name: "get_tax_documents",
+                description: "Loads the intermediate representation (the storage vault) of all user tax documents, including W-2s, 1099s, etc. Call this when you need to answer questions about the user's tax data or do calculations.",
                 parameters: {
                   type: "object",
-                  properties: {
-                    title: {
-                      type: "string",
-                      description: "The title of the album",
-                    },
-                    genre: { type: "string", description: "The genre fusion" },
-                    description: {
-                      type: "string",
-                      description: "Detailed concept summary",
-                    },
-                    tracklist: {
-                      type: "string",
-                      description: "List of tracks in the album",
-                    },
-                    instrumental: {
-                      type: "boolean",
-                      description:
-                        "Whether the album is instrumental or has vocals",
-                    },
-                    art_prompt: {
-                      type: "string",
-                      description: "Visual prompt for cover art",
-                    },
-                  },
-                  required: [
-                    "title",
-                    "genre",
-                    "description",
-                    "tracklist",
-                    "instrumental",
-                    "art_prompt",
-                  ],
-                },
-              },
+                  properties: {},
+                }
+              }
             ],
           },
         };
@@ -379,7 +459,8 @@ conversational tax guidance for high-frequency traders and tech professionals.
             content: [
               {
                 type: "input_text",
-                text: "Hello, Alisa! Today I want to talk about tax strategies for my stock trading. Can you help me understand how wash-sale rules work?",
+                //text: "Hello, Alisa! Today I want to talk about tax strategies for my stock trading. Can you help me understand how wash-sale rules work?",
+                text: "Hello, Alisa!"
               },
             ],
           },
@@ -432,41 +513,15 @@ conversational tax guidance for high-frequency traders and tech professionals.
       } else if (response.type === "response.function_call_arguments.done") {
         // Nova wants us to execute the function and return the results
         const fc = response;
-
         console.log("Advisor is calling function:", fc.name);
-
+        
         let functionResult: any = {};
-
         try {
-          const args = JSON.parse(fc.arguments || "{}");
-
-          if (fc.name === "print_album_concept") {
-            const concept = args;
-            console.log(`📀 NEW CONCEPT:
-${concept.title} (${concept.genre})
-Description:
-${concept.description}`);
-
-            const renderId = `msg-${Date.now()}`;
-
-            setChatHistory((prev) => [
-              ...prev,
-              {
-                id: renderId,
-                role: "assistant",
-                content: `📀 NEW CONCEPT:
-${concept.title} (${concept.genre})
-Description:
-${concept.description}
-Tracklist:
-${concept.tracklist}
-Album art prompt:
-${concept.art_prompt}`,
-                isImageLoading: true,
-              },
-            ]);
-
-            functionResult = { success: true, saved: true };
+          if (fc.name === "get_tax_documents") {
+            console.log("Providing tax documents from vault...");
+            functionResult = { documents: vaultDocumentsRef.current };
+          } else {
+             functionResult = { error: "Function not found" };
           }
         } catch (err) {
           console.error("Function execution error:", err);
@@ -484,6 +539,8 @@ ${concept.art_prompt}`,
             },
           }),
         );
+        // Prompt it to continue speaking using the function results:
+        wsRef.current?.send(JSON.stringify({ type: "response.create" }));
       } else if (
         response.type ===
         "conversation.item.input_audio_transcription.completed"
@@ -691,10 +748,6 @@ ${concept.art_prompt}`,
         cancelAnimationFrame(animationFrameRef.current);
         animationFrameRef.current = null;
       }
-      if (localVideoStreamRef.current) {
-        localVideoStreamRef.current.getTracks().forEach((t) => t.stop());
-        localVideoStreamRef.current = null;
-      }
     };
   }, [hasInteracted]);
 
@@ -715,81 +768,6 @@ ${concept.art_prompt}`,
     }
   }, [isMicMuted]);
 
-  // Sync the local video stream with the video element whenever it mounts
-  useEffect(() => {
-    if ((isCameraActive || isScreenSharing) && localVideoRef.current && localVideoStreamRef.current) {
-      localVideoRef.current.srcObject = localVideoStreamRef.current;
-      localVideoRef.current.play().catch(e => console.error("Video play error:", e));
-    }
-  }, [isCameraActive, isScreenSharing]);
-
-  // Handle Video Frame Streaming to AI Server
-  useEffect(() => {
-    if (videoIntervalRef.current) {
-      clearInterval(videoIntervalRef.current);
-      videoIntervalRef.current = null;
-    }
-
-    if (isCameraActive || isScreenSharing) {
-      const canvas = document.createElement("canvas");
-      const ctx = canvas.getContext("2d");
-
-      // We'll capture and send frames periodically. 
-      videoIntervalRef.current = window.setInterval(() => {
-        if (
-          localVideoRef.current &&
-          localVideoRef.current.readyState >= 2 // HTMLMediaElement.HAVE_CURRENT_DATA
-        ) {
-          canvas.width = localVideoRef.current.videoWidth;
-          canvas.height = localVideoRef.current.videoHeight;
-          ctx?.drawImage(localVideoRef.current, 0, 0, canvas.width, canvas.height);
-          
-          canvas.toBlob(
-            (blob) => {
-              if (blob) {
-                const reader = new FileReader();
-                reader.readAsDataURL(blob);
-                reader.onloadend = () => {
-                  const dataUrl = reader.result as string;
-                  
-                  // NOTE: The Amazon Nova "nova-2-sonic-v1" model strictly only supports 
-                  // "input_text" and "input_audio_buffer" in its realtime schema currently.
-                  // Sending images causes: "Content type 'image_url' is not supported. Only 'input_text' is supported."
-                  // We are commenting out the send function here so it doesn't crash your connection.
-                  /*
-                  wsRef.current?.send(
-                    JSON.stringify({
-                      type: "conversation.item.create",
-                      item: {
-                        type: "message",
-                        role: "user",
-                        content: [
-                          {
-                            type: "image_url",
-                            image_url: { url: dataUrl },
-                          },
-                        ],
-                      },
-                    })
-                  );
-                  */
-                };
-              }
-            },
-            "image/jpeg",
-            0.5
-          );
-        }
-      }, 2000);
-    }
-
-    return () => {
-      if (videoIntervalRef.current) {
-        clearInterval(videoIntervalRef.current);
-        videoIntervalRef.current = null;
-      }
-    };
-  }, [isCameraActive, isScreenSharing]);
 
   const startVisualizer = () => {
     if (!canvasRef.current || !analyserRef.current) return;
@@ -1067,59 +1045,6 @@ ${concept.art_prompt}`,
 
             {/* Middle: Controls */}
             <div className="flex items-center gap-4">
-              {/* Screen Share Toggle */}
-              <button
-                onClick={toggleScreenShare}
-                className={`p-3 rounded-full transition-all shadow-lg ${
-                  isScreenSharing
-                    ? "bg-green-600 hover:bg-green-700 text-white"
-                    : "bg-gray-800/80 hover:bg-gray-700 text-white backdrop-blur-sm"
-                }`}
-                title="Toggle Screen Share"
-              >
-                <svg
-                  xmlns="http://www.w3.org/2000/svg"
-                  width="20"
-                  height="20"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
-                  <line x1="8" y1="21" x2="16" y2="21"></line>
-                  <line x1="12" y1="17" x2="12" y2="21"></line>
-                </svg>
-              </button>
-
-              {/* Camera Toggle */}
-              <button
-                onClick={toggleCamera}
-                className={`p-3 rounded-full transition-all shadow-lg ${
-                  isCameraActive
-                    ? "bg-emerald-600 hover:bg-emerald-700 text-white"
-                    : "bg-gray-800/80 hover:bg-gray-700 text-white backdrop-blur-sm"
-                }`}
-                title="Toggle Camera"
-              >
-                <svg
-                  xmlns="http://www.w3.org/2000/svg"
-                  width="20"
-                  height="20"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path>
-                  <circle cx="12" cy="13" r="4"></circle>
-                </svg>
-              </button>
-
               {/* Thinking Toggle */}
               <button
                 onClick={() => setShowThinking(!showThinking)}
@@ -1260,23 +1185,152 @@ ${concept.art_prompt}`,
         </div>
       </div>
 
-      {/* Local Video Section (Right Side) */}
-      {(isCameraActive || isScreenSharing) && (
-        <div className="flex flex-col w-full max-w-sm h-full animate-in fade-in slide-in-from-right-4 duration-300 pb-8 pt-8 items-center justify-center">
-          <div className="bg-gray-900 rounded-lg overflow-hidden border border-gray-800 flex flex-col shadow-inner relative justify-center w-full min-h-[200px]">
-            <div className="absolute top-2 left-2 bg-black/60 px-2 py-1 rounded text-xs z-10 backdrop-blur-sm text-gray-200">
-              {isCameraActive ? "Camera Active" : "Screen Share Active"}
+      {/* Document Scanning & Vault Section (Right Side) */}
+      <div className="flex flex-col w-full max-w-md h-full animate-in fade-in slide-in-from-right-4 duration-300 pb-8 pt-8 items-center justify-start gap-4 overflow-hidden">
+        {/* Scanner Panel */}
+        <div className="bg-gray-900 rounded-lg w-full p-4 border border-gray-800 shadow-inner flex flex-col gap-4 flex-shrink-0">
+          <h3 className="text-white font-bold text-lg text-center">Tax Document Scanner</h3>
+          
+          <input 
+            type="file" 
+            multiple 
+            accept=".pdf,image/png,image/jpeg,image/webp" 
+            onChange={handleFileChange}
+            className="text-sm text-gray-400 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-purple-600 file:text-white hover:file:bg-purple-700" 
+          />
+          
+          {scanFiles.length > 0 && (
+            <div className="text-sm text-gray-300">
+              {scanFiles.length} file(s) selected
+              <ul className="list-disc pl-4 mt-2 max-h-24 overflow-y-auto">
+                {scanFiles.map((f, i) => (
+                  <li key={i} className="truncate">{f.name}</li>
+                ))}
+              </ul>
             </div>
-            <video
-              ref={localVideoRef}
-              autoPlay
-              playsInline
-              muted
-              className="w-full object-contain max-h-[70vh] rounded-lg"
-            />
+          )}
+
+          <button 
+            onClick={scanSelectedFiles} 
+            disabled={isScanning || scanFiles.length === 0}
+            className={`font-bold py-3 px-6 rounded-lg w-full transition-colors shadow-lg flex items-center justify-center gap-2 ${
+              isScanning || scanFiles.length === 0 
+                ? "bg-gray-600 text-gray-400 cursor-not-allowed" 
+                : "bg-purple-600 hover:bg-purple-700 text-white"
+            }`}
+          >
+            {isScanning ? (
+              <span>Scanning...</span>
+            ) : (
+              <>
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
+                Scan with Vision AI
+              </>
+            )}
+          </button>
+        </div>
+
+        {/* Vault Panel (Intermediate Representation) */}
+        <div className="bg-gray-900 rounded-lg border border-gray-800 flex flex-col shadow-inner w-full flex-1 overflow-hidden p-4">
+          <div className="flex justify-between items-center mb-4">
+            <h3 className="text-white font-bold text-lg flex items-center gap-2">
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 2l-2 2v16l2 2H3l2-2V4L3 2z"></path><line x1="9" y1="2" x2="9" y2="22"></line><line x1="15" y1="2" x2="15" y2="22"></line></svg>
+              Document Vault
+            </h3>
+            <span className="text-xs bg-blue-600 px-2 py-1 rounded-full">{vaultDocuments.length} Records</span>
+          </div>
+
+          <div className="flex-1 overflow-y-auto pr-2 space-y-4 scrollbar-thin scrollbar-thumb-gray-700">
+            {vaultDocuments.length === 0 ? (
+              <p className="text-gray-500 text-sm italic text-center mt-10">No documents scanned yet.<br/>Upload a tax form above.</p>
+            ) : (
+              vaultDocuments.map((doc, idx) => (
+                <div key={doc.id} className={`bg-gray-800 p-3 rounded-md border ${doc.isReviewing || !doc.owner || !doc.taxYear || !doc.formName ? 'border-amber-500' : 'border-gray-700'}`}>
+                  <div className="flex justify-between items-start mb-2">
+                    <span className="text-xs font-bold text-purple-400">#{doc.ordinalNumber} - {doc.id}</span>
+                    <button 
+                      onClick={() => {
+                        const newVault = vaultDocuments.filter(d => d.id !== doc.id);
+                        setVaultDocuments(newVault);
+                        vaultDocumentsRef.current = newVault;
+                      }}
+                      className="text-red-400 hover:text-red-300 p-1"
+                      title="Delete"
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+                    </button>
+                  </div>
+
+                  <div className="flex flex-col gap-2">
+                    <div className="flex flex-col">
+                      <label className="text-[10px] text-gray-400 uppercase">Owner Name</label>
+                      <input 
+                        type="text" 
+                        value={doc.owner} 
+                        onChange={(e) => {
+                          const newDocs = [...vaultDocuments];
+                          newDocs[idx].owner = e.target.value;
+                          setVaultDocuments(newDocs);
+                          vaultDocumentsRef.current = newDocs;
+                        }}
+                        className={`bg-gray-900 border ${!doc.owner ? 'border-amber-500' : 'border-gray-700'} text-xs p-1.5 rounded text-white`}
+                        placeholder="e.g. John Doe"
+                      />
+                    </div>
+                    
+                    <div className="flex gap-2">
+                      <div className="flex flex-col flex-1">
+                        <label className="text-[10px] text-gray-400 uppercase">Form Type</label>
+                        <input 
+                          type="text" 
+                          value={doc.formName} 
+                          onChange={(e) => {
+                            const newDocs = [...vaultDocuments];
+                            newDocs[idx].formName = e.target.value;
+                            setVaultDocuments(newDocs);
+                            vaultDocumentsRef.current = newDocs;
+                          }}
+                          className={`bg-gray-900 border ${!doc.formName ? 'border-amber-500' : 'border-gray-700'} text-xs p-1.5 rounded text-white`}
+                          placeholder="e.g. 1099-B"
+                        />
+                      </div>
+                      <div className="flex flex-col flex-1">
+                        <label className="text-[10px] text-gray-400 uppercase">Tax Year</label>
+                        <input 
+                          type="text" 
+                          value={doc.taxYear} 
+                          onChange={(e) => {
+                            const newDocs = [...vaultDocuments];
+                            newDocs[idx].taxYear = e.target.value;
+                            setVaultDocuments(newDocs);
+                            vaultDocumentsRef.current = newDocs;
+                          }}
+                          className={`bg-gray-900 border ${!doc.taxYear ? 'border-amber-500' : 'border-gray-700'} text-xs p-1.5 rounded text-white`}
+                          placeholder="e.g. 2023"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="flex flex-col">
+                      <label className="text-[10px] text-gray-400 uppercase">Extracted Data (JSON)</label>
+                      <textarea 
+                        value={doc.dataFields}
+                        onChange={(e) => {
+                          const newDocs = [...vaultDocuments];
+                          newDocs[idx].dataFields = e.target.value;
+                          setVaultDocuments(newDocs);
+                          vaultDocumentsRef.current = newDocs;
+                        }}
+                        className="bg-gray-900 border border-gray-700 text-green-400 text-xs p-1.5 rounded font-mono h-24 resize-y"
+                      />
+                    </div>
+                  </div>
+                </div>
+              ))
+            )}
           </div>
         </div>
-      )}
+      </div>
     </div>
   );
 };
