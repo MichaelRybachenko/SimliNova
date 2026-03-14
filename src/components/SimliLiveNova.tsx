@@ -42,35 +42,49 @@ async function analyzeTaxFiles(files: File[]) {
           source: { bytes: uint8Array }
         }
       });
+    } else {
+      // It's possible Bedrock gets mad if we push something it doesn't understand. 
+      // Skip unknown files safely.
+      continue;
     }
   }
 
-  const extractionPrompt = `
-    Analyze this document (or set of images) and return a JSON object with these EXACT keys:
-    {
-      "identity": {
-        "full_name": "string",
-        "ssn_last_4": "string"
-      },
-      "metadata": {
-        "tax_year": "YYYY",
-        "form_type": "1099-B | 1099-DIV | W-2 | etc"
-      },
-      "data_fields": {
-        "key": "value" // Extract EVERY field found on the form
-      },
-      "alisa_speech": "A short 1-sentence confirmation of who this belongs to and what it is."
-    }
-    Strictly return JSON. If the year or name is missing, mark as "UNKNOWN".
-  `;
+const extractionPrompt = `
+Analyze this document (or set of images) and return a JSON object with these EXACT keys:
+{
+  "identity": {
+    "full_name": "string"
+  },
+  "metadata": {
+    "tax_year": "YYYY",
+    "form_type": "1099-B | 1099-DIV | W-2 | etc",
+    "ordinal_hint": "number" // If multiple forms of the same type exist in this set, provide the sequence number.
+  },
+  "data_fields": {
+    "key": "value" // Extract EVERY field found on the form (e.g., "Box 1: Wages", "1a: Total Ordinary Dividends")
+  },
+  "alisa_speech": "A short 1-sentence confirmation of who this belongs to and what it is."
+}
 
-  content.push({ text: extractionPrompt });
+STRICT RULES:
+1. Return ONLY valid JSON.
+2. If "full_name", "tax_year", or "form_type" is missing/unreadable, you MUST mark the value as "UNKNOWN".
+3. Do not omit the "data_fields" object; if empty, return {}.
+`;
 
-  let response;
+  let response: any;
   try {
     const command = new ConverseCommand({
       modelId: "us.amazon.nova-lite-v1:0", // Cross-region Nova Lite
-      messages: [{ role: "user", content }]
+      messages: [
+        {
+          role: "user",
+          content: [
+            ...content, // Spread the files here (document / image blocks)
+            { text: extractionPrompt } // Append the text instruction *after* the files
+          ]
+        }
+      ]
     });
     response = await bedrockClient.send(command);
   } catch (err: any) {
@@ -78,7 +92,15 @@ async function analyzeTaxFiles(files: File[]) {
     try {
       const fallbackCommand = new ConverseCommand({
         modelId: "amazon.nova-lite-v1:0", // Fallback to base Nova Lite
-        messages: [{ role: "user", content }]
+        messages: [
+          {
+            role: "user",
+            content: [
+              ...content,
+              { text: extractionPrompt }
+            ]
+          }
+        ]
       });
       response = await bedrockClient.send(fallbackCommand);
     } catch(fallbackErr) {
@@ -95,8 +117,6 @@ async function analyzeTaxFiles(files: File[]) {
   }
   return text;
 }
-
-// No longer using `routeDocumentMock` since we manage state in React now, but keeping for reference or you can completely remove it down the line.
 
 export interface TaxDocument {
   id: string;
@@ -391,38 +411,23 @@ const SimliLiveNova: React.FC = () => {
           session: {
             type: "realtime",
             instructions: `
-## ROLE
-You are Alisa, a futuristic Tax Advisor. Your objective is to provide real-time, 
-conversational tax guidance for high-frequency traders and tech professionals.
+You are Alisa, a sophisticated and proactive Tax Advisor. Your primary goal is to help the user navigate their tax obligations, identify potential deductions, and summarize their financial status based on uploaded documents.
 
-## VOICE & PERSONALITY
-- TONE: Professional, reassuring, and slightly witty. You are a "FinTech 
-  Companion," not a cold calculator.
-- CADENCE: Speak in short, punchy sentences. Avoid long monologues.
-- BREVITY: Keep each response to 2-3 sentences max. This reduces latency 
-  and keeps the avatar animation fluid.
-- VERBAL FILLERS: Occasionally use "I see," "Got it," or "Let's look at that" 
-  to mimic natural human thought-processing time.
+Knowledge Access
+You have access to a "Tax Vault" containing the user's processed tax forms (W-2s, 1099s, etc.). To provide accurate advice, you must call the get_tax_documents() function whenever the user asks about their specific tax situation, income, or filings.
 
-## DOMAIN EXPERTISE (STOCKS & OPTIONS)
-- Specialize in capital gains (short vs. long term), wash-sale rules, and 
-  tax-loss harvesting.
-- If discussing complex numbers (e.g., $5,000 loss), say "five thousand 
-  dollars" instead of using digits to ensure the TTS (Text-to-Speech) 
-  engine pronounces it perfectly.
+Operational Rules
+Data Retrieval: When get_tax_documents returns data, analyze the data_fields and metadata (Year, Form Name, Owner) to answer queries.
 
-## SIMLI OPTIMIZATION (LIP-SYNC)
-- ENUNCIATION: Avoid overly technical jargon that creates "mumbled" 
-  lip-syncing. If a word is very long, break it up or use a simpler synonym.
-- INTERACTION: When the user finishes speaking, start with a brief
-  acknowledgment like "That's a great question" to trigger the avatar's 
-  mouth immediately while you "think" of the answer.
+Multiples: If the storage contains multiple versions of the same form (e.g., three 1099-Bs), use the "ordinal number" provided in the data to distinguish between them.
 
-## DISCLOSURE
-- Always maintain the persona, but if a user asks for a definitive 
-  legal filing, state: "While I'm your AI guide, always double-check 
-  the final numbers with a certified professional."
-  `,
+Missing Info: If a document in the vault is marked "UNKNOWN" for name or year, politely ask the user to provide that information so you can update their records.
+
+Tone: Be professional, concise, and helpful. Do not give definitive legal advice; use phrases like "Based on the documents provided..."
+
+Function Call logic
+Trigger: Call get_tax_documents at the start of any session where the user mentions "my taxes," "my income," or "what did I earn last year."
+`,
             audio: {
               input: {
                 turn_detection: {
