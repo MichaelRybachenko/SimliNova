@@ -1,32 +1,42 @@
 import React, { useEffect, useRef, useState, useCallback } from "react";
 import { LogLevel, SimliClient } from "simli-client";
-import { BedrockRuntimeClient, ConverseCommand } from "@aws-sdk/client-bedrock-runtime";
 
 // This represents the legacy format - leaving comment but removing global
 // let mockVault: any = {};
-
-const bedrockClient = new BedrockRuntimeClient({
-  region: "us-east-1",
-  credentials: {
-    accessKeyId: import.meta.env.VITE_AWS_ACCESS_KEY_ID || "",
-    secretAccessKey: import.meta.env.VITE_AWS_SECRET_ACCESS_KEY || "",
-  }
-});
 
 async function analyzeTaxFiles(files: File[]) {
   const content: any[] = [];
 
   for (let i = 0; i < files.length; i++) {
     const file = files[i];
-    const buffer = await file.arrayBuffer();
-    const uint8Array = new Uint8Array(buffer);
+
+    // Check file size (Bedrock limit ~10MB)
+    if (file.size > 10 * 1024 * 1024) {
+      console.warn(`Skipping ${file.name}: exceeds 10MB limit`);
+      continue;
+    }
+
+    const base64String = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        if (typeof reader.result === 'string') {
+          // Removes the "data:*/*;base64," prefix
+          const base64 = reader.result.split(',')[1];
+          resolve(base64);
+        } else {
+          reject(new Error("File read error"));
+        }
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
 
     if (file.type === "application/pdf") {
       content.push({
         document: {
           name: `doc_${i}`,
           format: "pdf",
-          source: { bytes: uint8Array }
+          source: { bytesBase64: base64String }
         }
       });
     } else if (file.type.startsWith("image/")) {
@@ -39,59 +49,42 @@ async function analyzeTaxFiles(files: File[]) {
       content.push({
         image: {
           format: format,
-          source: { bytes: uint8Array }
+          source: { bytesBase64: base64String }
         }
       });
     } else {
-      // It's possible Bedrock gets mad if we push something it doesn't understand. 
       // Skip unknown files safely.
       continue;
     }
   }
 
+  if (content.length === 0) {
+    throw new Error("No valid files provided (PDF/image under 10MB limit).");
+  }
+
 const extractionPrompt = `
-Analyze this document (or set of images) and return a JSON object with these EXACT keys:
+Extract data from this document. Return **ONLY VALID JSON** with this structure:
+
 {
-  "identity": {
-    "full_name": "string"
-  },
-  "metadata": {
-    "tax_year": "YYYY",
-    "form_type": "1099-B | 1099-DIV | W-2 | etc",
-    "ordinal_hint": "number" // If multiple forms of the same type exist in this set, provide the sequence number.
-  },
-  "data_fields": {
-    "key": "value" // Extract EVERY field found on the form (e.g., "Box 1: Wages", "1a: Total Ordinary Dividends")
-  },
-  "alisa_speech": "A short 1-sentence confirmation of who this belongs to and what it is."
+  "identity": { "full_name": "string" },
+  "metadata": { "tax_year": "YYYY", "form_type": "1099-B | W-2 | etc", "ordinal_hint": 0 },
+  "data_fields": { "key": "value" },
+  "alisa_speech": "1-sentence confirmation"
 }
 
-STRICT RULES:
-1. Return ONLY valid JSON.
-2. If "full_name", "tax_year", or "form_type" is missing/unreadable, you MUST mark the value as "UNKNOWN".
-3. Do not omit the "data_fields" object; if empty, return {}.
+Rules:
+- If data is missing, use "UNKNOWN".
+- data_fields must be an object (empty if no fields).
+- NO EXTRA TEXT! NO MARKDOWN!
 `;
 
   let response: any;
   try {
-    const command = new ConverseCommand({
-      modelId: "us.amazon.nova-lite-v1:0", // Cross-region Nova Lite
-      messages: [
-        {
-          role: "user",
-          content: [
-            ...content, // Spread the files here (document / image blocks)
-            { text: extractionPrompt } // Append the text instruction *after* the files
-          ]
-        }
-      ]
-    });
-    response = await bedrockClient.send(command);
-  } catch (err: any) {
-    console.warn("Cross-region Nova Lite failed, falling back to base ID amazon.nova-lite-v1:0", err);
-    try {
-      const fallbackCommand = new ConverseCommand({
-        modelId: "amazon.nova-lite-v1:0", // Fallback to base Nova Lite
+    const res = await fetch("/api/bedrock-converse", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        modelId: "amazon.nova-lite-v1:0",
         messages: [
           {
             role: "user",
@@ -101,19 +94,33 @@ STRICT RULES:
             ]
           }
         ]
-      });
-      response = await bedrockClient.send(fallbackCommand);
-    } catch(fallbackErr) {
-       throw fallbackErr; // If this fails, let the error propagate to the UI
+      })
+    });
+    
+    if (!res.ok) {
+      const errorText = await res.text();
+      throw new Error(`Proxy error ${res.status}: ${errorText}`);
     }
+    
+    response = await res.json();
+  } catch (err: any) {
+    console.error("Nova Lite analysis failed:", err);
+    throw new Error("Analysis service error: " + (err.message || String(err)));
   }
 
   const text = response.output?.message?.content?.[0]?.text || "";
   
-  // Try to cleanly extract JSON if wrapped in markdown blocks
-  const jsonMatch = text.match(/\{[\s\S]*\}/);
-  if (jsonMatch) {
-    return jsonMatch[0];
+  // Safe JSON extraction
+  const jsonStart = text.indexOf("{");
+  const jsonEnd = text.lastIndexOf("}");
+  if (jsonStart !== -1 && jsonEnd !== -1) {
+    const jsonStr = text.slice(jsonStart, jsonEnd + 1);
+    try {
+      JSON.parse(jsonStr); // test parse
+      return jsonStr; // return string so the caller can parse it
+    } catch (e) {
+      console.error("Failed to parse JSON out of response:", jsonStr);
+    }
   }
   return text;
 }

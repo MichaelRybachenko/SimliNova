@@ -9,8 +9,7 @@
     "preview": "vite preview",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
-    "deploy": "npm run build && wrangler pages deploy dist",
-    "server": "node server/index.cjs"
+    "deploy": "npm run build && wrangler pages deploy dist"
   },
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.1009.0",
