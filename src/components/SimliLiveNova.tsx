@@ -34,9 +34,9 @@ async function analyzeTaxFiles(files: File[]) {
     if (file.type === "application/pdf") {
       content.push({
         document: {
-          name: `doc_${i}`,
+          name: `doc-${i}`,
           format: "pdf",
-          source: { bytesBase64: base64String }
+          source: { bytes: base64String }
         }
       });
     } else if (file.type.startsWith("image/")) {
@@ -49,7 +49,7 @@ async function analyzeTaxFiles(files: File[]) {
       content.push({
         image: {
           format: format,
-          source: { bytesBase64: base64String }
+          source: { bytes: base64String }
         }
       });
     } else {
@@ -63,19 +63,7 @@ async function analyzeTaxFiles(files: File[]) {
   }
 
 const extractionPrompt = `
-Extract data from this document. Return **ONLY VALID JSON** with this structure:
-
-{
-  "identity": { "full_name": "string" },
-  "metadata": { "tax_year": "YYYY", "form_type": "1099-B | W-2 | etc", "ordinal_hint": 0 },
-  "data_fields": { "key": "value" },
-  "alisa_speech": "1-sentence confirmation"
-}
-
-Rules:
-- If data is missing, use "UNKNOWN".
-- data_fields must be an object (empty if no fields).
-- NO EXTRA TEXT! NO MARKDOWN!
+Extract data from this document. If data is missing, use "UNKNOWN".
 `;
 
   let response: any;
@@ -84,7 +72,7 @@ Rules:
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        modelId: "amazon.nova-lite-v1:0",
+        modelId: "us.amazon.nova-lite-v1:0",
         messages: [
           {
             role: "user",
@@ -93,7 +81,52 @@ Rules:
               { text: extractionPrompt }
             ]
           }
-        ]
+        ],
+        toolConfig: {
+          tools: [
+            {
+              toolSpec: {
+                name: "extract_tax_data",
+                description: "Extract structured data from the document inside a strict JSON schema.",
+                inputSchema: {
+                  json: {
+                    type: "object",
+                    properties: {
+                      identity: { 
+                        type: "object",
+                        properties: { full_name: { type: "string", description: "The full name of the person or entity." } },
+                        required: ["full_name"]
+                      },
+                      metadata: { 
+                        type: "object",
+                        properties: { 
+                          tax_year: { type: "string", description: "YYYY format" },
+                          form_type: { type: "string", description: "1099-B, W-2, etc." },
+                          ordinal_hint: { type: "number", description: "Order hint if multiple" }
+                        },
+                        required: ["tax_year", "form_type"]
+                      },
+                      data_fields: { 
+                        type: "object",
+                        description: "Key-value pairs of the actual tax data extracted from the document."
+                      },
+                      alisa_speech: { 
+                        type: "string",
+                        description: "1-sentence confirmation speech"
+                      }
+                    },
+                    required: ["identity", "metadata", "data_fields", "alisa_speech"]
+                  }
+                }
+              }
+            }
+          ],
+          toolChoice: {
+            tool: {
+              name: "extract_tax_data"
+            }
+          }
+        }
       })
     });
     
@@ -108,7 +141,15 @@ Rules:
     throw new Error("Analysis service error: " + (err.message || String(err)));
   }
 
-  const text = response.output?.message?.content?.[0]?.text || "";
+  const contentBlocks = response.output?.message?.content || [];
+  const toolUseBlock = contentBlocks.find((b: any) => b.toolUse);
+  
+  if (toolUseBlock && toolUseBlock.toolUse.name === "extract_tax_data") {
+    return JSON.stringify(toolUseBlock.toolUse.input);
+  }
+
+  // Fallback mapping if standard text was returned
+  const text = contentBlocks[0]?.text || "";
   
   // Safe JSON extraction
   const jsonStart = text.indexOf("{");

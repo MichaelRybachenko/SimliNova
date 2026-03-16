@@ -28,17 +28,15 @@ export default defineConfig(({mode}) => {
               });
 
               // Convert base64 back to Uint8Array for Bedrock SDK
-              const { modelId, messages } = req.body;
+              const { modelId, messages, toolConfig, system } = req.body;
               const parsedMessages = messages.map((msg: any) => {
                 if (msg.content) {
                   msg.content = msg.content.map((block: any) => {
-                    if (block.document?.source?.bytesBase64) {
-                      block.document.source.bytes = Buffer.from(block.document.source.bytesBase64, 'base64');
-                      delete block.document.source.bytesBase64;
+                    if (block.document && block.document.source && typeof block.document.source.bytes === 'string') {
+                      block.document.source.bytes = Buffer.from(block.document.source.bytes, 'base64');
                     }
-                    if (block.image?.source?.bytesBase64) {
-                      block.image.source.bytes = Buffer.from(block.image.source.bytesBase64, 'base64');
-                      delete block.image.source.bytesBase64;
+                    if (block.image && block.image.source && typeof block.image.source.bytes === 'string') {
+                      block.image.source.bytes = Buffer.from(block.image.source.bytes, 'base64');
                     }
                     return block;
                   });
@@ -46,10 +44,15 @@ export default defineConfig(({mode}) => {
                 return msg;
               });
 
-              const command = new ConverseCommand({
-                modelId: modelId || "amazon.nova-lite-v1:0",
+              const commandParams: any = {
+                modelId: modelId || "us.amazon.nova-lite-v1:0",
                 messages: parsedMessages
-              });
+              };
+              
+              if (toolConfig) commandParams.toolConfig = toolConfig;
+              if (system) commandParams.system = system;
+
+              const command = new ConverseCommand(commandParams);
               
               const response = await bedrockClient.send(command);
               res.json(response);

@@ -12,7 +12,9 @@
     "deploy": "npm run build && wrangler pages deploy dist"
   },
   "dependencies": {
+    "@aws-sdk/client-bedrock": "^3.1009.0",
     "@aws-sdk/client-bedrock-runtime": "^3.1009.0",
+    "@aws-sdk/client-sts": "^3.1009.0",
     "@google-cloud/aiplatform": "^6.4.0",
     "@google/genai": "^1.43.0",
     "cors": "^2.8.6",
